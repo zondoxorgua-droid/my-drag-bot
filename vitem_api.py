@@ -15,11 +15,11 @@ class VItemAPI:
                 else:
                     raise ValueError("Session ID not found in HTML")
 
-    async def generate_payment_link(self, item_id: str, user_id: str, platform: str) -> str:
+    async def generate_payment_link(self, item_id: str, user_id: str, platform: str, email: str) -> str:
         session_id = await self._get_session_id()
         api_url = (
             f"{self.BASE_URL}/api/v1/lots/{item_id}?" +
-            f"userId={user_id}&project={platform}&email=test@test.com&sessionId={session_id}"
+            f"userId={user_id}&project={platform}&email={email}&sessionId={session_id}"
         )
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url) as response:

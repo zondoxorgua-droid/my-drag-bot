@@ -1,0 +1,187 @@
+import asyncio
+import logging
+import re
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from vitem_api import VItemAPI
+
+# Simple email regex for Xsolla-friendly validation
+EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+# Bot token from user
+TOKEN = "8775350643:AAERKzLICFMbGPzeLvSSCxl5X6aTCxDDhWc"
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
+# Initialize bot and dispatcher
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+vitem_api = VItemAPI()
+
+# States
+class Form(StatesGroup):
+    player_id = State()
+    email = State()
+    platform = State()
+    category = State()
+    item = State()
+
+# Item data per platform
+ITEMS = {
+    "DR_ANDROID": {
+        "Наборы": {
+            "race_offer_1": "Нитро-набор (999₽)",
+            "race_offer_4": "Свап-кит (300₽)",
+            "race_offer_3": "Комплект чертежей (1300₽)",
+            "race_offer_2": "Талон на перепаковку (140000₽)",
+            "race_offer_5": "B-M8 COMPETITION (350₽)",
+            "race_offer_6": "J-INTERCEPTOR (200₽)",
+        },
+        "Авто": {
+            "race_special_new_1": "P-Carrera GT targa (449₽)",
+            "race_special_new_2": "P-Zonda Cinque cab (449₽)",
+            "race_special_new_3": "T-MR2 W20 (449₽)",
+            "race_special_4": "P-Zonda Cinque (449₽)",
+        },
+        "Баксы": {
+            "race_7": "120000 голды (9490₽)",
+            "race_6": "55000 голды (4690₽)",
+            "race_5": "20000 голды (1790₽)",
+            "race_4": "9500 голды (899₽)",
+            "race_3": "4500 голды (449₽)",
+            "race_2": "1500 голды (179₽)",
+        },
+        "Алмазы": {
+            "race_diamond_6": "6000 алмазов (9599₽)",
+            "race_diamond_5": "2100 алмазов (4790₽)",
+            "race_diamond_4": "780 алмазов (1799₽)",
+            "race_diamond_3": "390 алмазов (899₽)",
+            "race_diamond_2": "180 алмазов (459₽)",
+            "race_diamond_1": "60 алмазов (179₽)",
+        },
+    },
+    "DR_IOS": {
+        "Наборы": {
+            "ios_offer_1": "Нитро-набор (999₽)",
+            "ios_offer_4": "Свап-кит (300₽)",
+            "ios_offer_3": "Комплект чертежей (1300₽)",
+            "ios_offer_2": "Талон на перепаковку (140000₽)",
+            "ios_offer_6": "J-INTERCEPTOR (200₽)",
+        },
+        "Авто": {
+            "ios_race_offer_1": "P-Carrera GT targa (449₽)",
+            "ios_race_offer_2": "P-Zonda Cinque cab (449₽)",
+            "ios_race_offer_3": "D-Viper 5gen (449₽)",
+            "ios_race_11": "P-Zonda Cinque (449₽)",
+        },
+        "Баксы": {
+            "ios_race_17": "120000 голды (9490₽)",
+            "ios_race_16": "55000 голды (4690₽)",
+            "ios_race_15": "20000 голды (1790₽)",
+            "ios_race_14": "9500 голды (899₽)",
+            "ios_race_13": "4500 голды (449₽)",
+            "ios_race_12": "1500 голды (179₽)",
+        },
+        "Алмазы": {
+            "diamonds_6": "6000 алмазов (9599₽)",
+            "diamonds_5": "2100 алмазов (4790₽)",
+            "diamonds_4": "780 алмазов (1799₽)",
+            "diamonds_3": "390 алмазов (899₽)",
+            "diamonds_2": "180 алмазов (459₽)",
+            "diamonds_1": "60 алмазов (179₽)",
+        },
+        "Премиум": {
+            "ios_premium_token_lvl1_3": "Премиум: уровень 1 (499₽)",
+        },
+    },
+}
+
+PLATFORMS = {"Android": "DR_ANDROID", "iOS": "DR_IOS"}
+
+# Handlers
+@dp.message(Command("start"))
+async def command_start(message: types.Message, state: FSMContext):
+    await state.set_state(Form.player_id)
+    await message.answer("Привет! Введите ваш ID игрока:")
+
+@dp.message(Form.player_id)
+async def process_player_id(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("ID игрока должен быть числом. Пожалуйста, введите корректный ID.")
+        return
+    await state.update_data(player_id=message.text)
+    await state.set_state(Form.email)
+    await message.answer("Теперь введите ваш Email (на него Xsolla пришлёт чек):")
+
+@dp.message(Form.email)
+async def process_email(message: types.Message, state: FSMContext):
+    email = (message.text or "").strip()
+    if not EMAIL_REGEX.match(email):
+        await message.answer("Некорректный Email. Пример: example@mail.com. Попробуйте ещё раз:")
+        return
+    await state.update_data(email=email)
+    await state.set_state(Form.platform)
+
+    builder = InlineKeyboardBuilder()
+    for platform_name in PLATFORMS.keys():
+        builder.add(types.InlineKeyboardButton(text=platform_name, callback_data=f"platform_{platform_name}"))
+    await message.answer("Выберите платформу:", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("platform_"), Form.platform)
+async def process_platform(callback: types.CallbackQuery, state: FSMContext):
+    platform_name = callback.data.split("_")[1]
+    platform_code = PLATFORMS[platform_name]
+    await state.update_data(platform=platform_code)
+    await state.set_state(Form.category)
+
+    builder = InlineKeyboardBuilder()
+    for category_name in ITEMS[platform_code].keys():
+        builder.add(types.InlineKeyboardButton(text=category_name, callback_data=f"category_{category_name}"))
+    await callback.message.edit_text("Выберите категорию:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("category_"), Form.category)
+async def process_category(callback: types.CallbackQuery, state: FSMContext):
+    category_name = callback.data.split("_")[1]
+    user_data = await state.get_data()
+    platform_code = user_data["platform"]
+    await state.update_data(category=category_name)
+    await state.set_state(Form.item)
+
+    builder = InlineKeyboardBuilder()
+    for item_id, item_name in ITEMS[platform_code][category_name].items():
+        builder.add(types.InlineKeyboardButton(text=item_name, callback_data=f"item_{item_id}"))
+    builder.adjust(1)
+    await callback.message.edit_text(f"Выберите товар из категории '{category_name}':", reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("item_"), Form.item)
+async def process_item(callback: types.CallbackQuery, state: FSMContext):
+    item_id = callback.data.replace("item_", "")
+    user_data = await state.get_data()
+    player_id = user_data["player_id"]
+    platform = user_data["platform"]
+    email = user_data["email"]
+
+    await callback.message.edit_text("Генерирую ссылку для оплаты...")
+    await callback.answer()
+
+    try:
+        payment_link = await vitem_api.generate_payment_link(item_id, player_id, platform, email)
+        await callback.message.answer(f"Ваша ссылка для оплаты: {payment_link}")
+    except Exception as e:
+        logging.error(f"Error generating payment link: {e}")
+        await callback.message.answer(f"Произошла ошибка при генерации ссылки: {e}")
+    finally:
+        await state.clear()
+        await callback.message.answer("Для начала заново введите /start")
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
