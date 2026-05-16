@@ -29,8 +29,10 @@ from aiogram.types import (
 from oxide_api import (
     CATALOG,
     CATALOG_BY_SKU,
+    OxideApiError,
     build_razer_gold_url,
     create_payment_token,
+    get_razer_gold_url,
 )
 
 
@@ -153,18 +155,39 @@ async def on_email(message: Message, state: FSMContext) -> None:
 
     await state.clear()
 
-    status_msg = await message.answer("⏳ Создаю заказ в Xsolla…")
+    status_msg = await message.answer("⏳ Готовлю прямую ссылку на Razer Gold…")
+
+    pay_url: str
+    invoice_id: int = 0
+    fallback_used = False
     try:
-        token, order_id = await create_payment_token(sel.sku, sel.country)
+        pay_url, invoice_id = await get_razer_gold_url(
+            sku=sel.sku,
+            country=sel.country,
+            oxide_id=oxide_id,
+            email=email,
+        )
+    except OxideApiError as exc:
+        # Если что-то поменялось в Xsolla — отдадим хотя бы paystation-ссылку.
+        log.warning("get_razer_gold_url failed (%s); falling back to paystation link", exc)
+        try:
+            token, invoice_id = await create_payment_token(sel.sku, sel.country)
+            pay_url = build_razer_gold_url(token)
+            fallback_used = True
+        except Exception as exc2:
+            log.exception("create_payment_token also failed")
+            await status_msg.edit_text(
+                f"❌ Не получилось создать заказ: <code>{exc2}</code>\n\n"
+                "Попробуй ещё раз через /start.",
+            )
+            return
     except Exception as exc:
-        log.exception("create_payment_token failed")
+        log.exception("unexpected error")
         await status_msg.edit_text(
-            f"❌ Не получилось создать заказ: <code>{exc}</code>\n\n"
+            f"❌ Что-то пошло не так: <code>{exc}</code>\n\n"
             "Попробуй ещё раз через /start.",
         )
         return
-
-    pay_url = build_razer_gold_url(token)
 
     pay_kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -172,14 +195,27 @@ async def on_email(message: Message, state: FSMContext) -> None:
             [InlineKeyboardButton(text="🛒 Купить ещё", callback_data="menu")],
         ]
     )
+
+    invoice_line = f"🧾 Invoice: <code>#{invoice_id}</code>\n" if invoice_id else ""
+    if fallback_used:
+        hint = (
+            "⚠️ Прямой Razer Gold redirect временно недоступен — открыта страница "
+            "Xsolla с автовыбором Razer Gold. На ней нужно нажать <b>Continue</b>."
+        )
+    else:
+        hint = (
+            "👇 Жми кнопку — сразу откроется страница оплаты "
+            "<b>global.gold.razer.com</b> с твоим заказом."
+        )
+
     await status_msg.edit_text(
-        f"✅ Заказ <b>#{order_id}</b> создан!\n\n"
+        f"✅ Заказ создан!\n\n"
         f"📦 <b>{sel.name}</b> — {sel.price}\n"
         f"🌍 Регион: <b>{sel.country}</b>\n"
         f"🎮 Oxide ID: <code>{oxide_id}</code>\n"
-        f"📧 Email: <code>{email}</code>\n\n"
-        f"👇 Жми кнопку ниже — откроется страница оплаты Xsolla с уже выбранным "
-        f"<b>Razer Gold</b>. На странице вводишь Oxide ID и email — те что выше.",
+        f"📧 Email: <code>{email}</code>\n"
+        f"{invoice_line}\n"
+        f"{hint}",
         reply_markup=pay_kb,
     )
 
