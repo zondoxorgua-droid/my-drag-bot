@@ -30,7 +30,6 @@ from oxide_api import (
     CATALOG,
     CATALOG_BY_SKU,
     OxideApiError,
-    XsollaAntifraudError,
     build_razer_gold_url,
     create_payment_token,
     get_razer_gold_url,
@@ -161,7 +160,6 @@ async def on_email(message: Message, state: FSMContext) -> None:
     pay_url: str
     invoice_id: int = 0
     fallback_used = False
-    fallback_reason: str = ""
     try:
         pay_url, invoice_id = await get_razer_gold_url(
             sku=sel.sku,
@@ -169,28 +167,9 @@ async def on_email(message: Message, state: FSMContext) -> None:
             oxide_id=oxide_id,
             email=email,
         )
-    except XsollaAntifraudError as exc:
-        # Xsolla rate-limit / антифрод — отдадим paystation-ссылку с автовыбором Razer Gold.
-        log.warning("Antifraud (%s); falling back to paystation link", exc)
-        fallback_reason = (
-            "Xsolla сейчас не пропускает прямой redirect (часто бывает у людей "
-            "которые покупают много раз подряд — антифрод-кулдаун ~5–30 минут)."
-        )
-        try:
-            token, invoice_id = await create_payment_token(sel.sku, sel.country)
-            pay_url = build_razer_gold_url(token)
-            fallback_used = True
-        except Exception as exc2:
-            log.exception("create_payment_token also failed")
-            await status_msg.edit_text(
-                f"❌ Не получилось создать заказ: <code>{exc2}</code>\n\n"
-                "Подожди 5–10 минут и попробуй ещё раз через /start.",
-            )
-            return
     except OxideApiError as exc:
-        # Структурная ошибка — Razer Gold не подключён, плохой Oxide ID и т.п.
+        # Если что-то поменялось в Xsolla — отдадим хотя бы paystation-ссылку.
         log.warning("get_razer_gold_url failed (%s); falling back to paystation link", exc)
-        fallback_reason = "Прямой Razer Gold redirect временно недоступен."
         try:
             token, invoice_id = await create_payment_token(sel.sku, sel.country)
             pay_url = build_razer_gold_url(token)
@@ -220,10 +199,8 @@ async def on_email(message: Message, state: FSMContext) -> None:
     invoice_line = f"🧾 Invoice: <code>#{invoice_id}</code>\n" if invoice_id else ""
     if fallback_used:
         hint = (
-            f"⚠️ {fallback_reason}\n\n"
-            "Жми кнопку — откроется страница Xsolla с уже выбранным <b>Razer Gold</b>. "
-            "Введи там <b>email</b> и нажми <b>Continue</b>, дальше Xsolla сам перебросит "
-            "на global.gold.razer.com."
+            "⚠️ Прямой Razer Gold redirect временно недоступен — открыта страница "
+            "Xsolla с автовыбором Razer Gold. На ней нужно нажать <b>Continue</b>."
         )
     else:
         hint = (

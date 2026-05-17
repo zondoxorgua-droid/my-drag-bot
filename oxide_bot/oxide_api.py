@@ -72,18 +72,6 @@ class OxideApiError(RuntimeError):
     pass
 
 
-class XsollaAntifraudError(OxideApiError):
-    """Xsolla 3032 — антифрод/rate-limit. Часто временный, проходит сам через 5-30 мин."""
-    pass
-
-
-# Коды Xsolla, по которым имеет смысл повторять запрос:
-# 3032 — fraud-suspect / rate limit (часто временно проходит)
-# 3001 — payment method временно недоступен
-# 4010 — generic processing error
-TRANSIENT_ERROR_CODES = {3032, 3001, 4010}
-
-
 # ──────────────── HTTP-обёртка ─────────────────────────────
 def _b64url_decode(data: str) -> bytes:
     pad = len(data) % 4
@@ -218,11 +206,6 @@ async def _submit_form(
 
     errors = data.get("errors") or []
     if errors:
-        first_code = errors[0].get("code")
-        if first_code in TRANSIENT_ERROR_CODES:
-            raise XsollaAntifraudError(
-                f"Xsolla code {first_code}: {errors[0].get('message','')[:200]}"
-            )
         raise OxideApiError(f"directpayment errors: {errors}")
 
     checkout = data.get("checkout") or {}
@@ -246,48 +229,26 @@ def _extract_razer_url(submit_response: dict[str, Any]) -> str:
 
 # ──────────────── публичный API ────────────────────────────
 async def get_razer_gold_url(
-    sku: str, country: str, oxide_id: str, email: str, zip_code: str = "97180",
-    *, max_retries: int = 2, retry_delay: float = 5.0,
+    sku: str, country: str, oxide_id: str, email: str, zip_code: str = "97180"
 ) -> tuple[str, int]:
     """Главная точка входа: возвращает прямую ссылку на Razer Gold + invoice id.
 
-    :param sku:           sku товара из CATALOG (e.g. "premium")
-    :param country:       ISO-код страны для региональной цены ("US", "BY", ...)
-    :param oxide_id:      игровой ID Oxide пользователя (e.g. "8Q-2ZR-2FD")
-    :param email:         email для чека
-    :param zip_code:      ZIP (обязателен для Razer, дефолт безопасный)
-    :param max_retries:   сколько раз повторить запрос при transient-ошибке Xsolla
-    :param retry_delay:   секунд ждать между попытками (растёт линейно)
+    :param sku:        sku товара из CATALOG (e.g. "premium")
+    :param country:    ISO-код страны для региональной цены ("US", "BY", ...)
+    :param oxide_id:   игровой ID Oxide пользователя (e.g. "8Q-2ZR-2FD")
+    :param email:      email для чека
+    :param zip_code:   ZIP (обязателен для Razer, дефолт безопасный)
     :return: (razer_url, invoice_id)
-    :raises XsollaAntifraudError: если все ретраи провалились по коду 3032/3001/4010
-    :raises OxideApiError: для других ошибок (неверный oxide_id, unsupported country, ...)
     """
-    last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
-        timeout = aiohttp.ClientTimeout(total=30)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                user_jwt = await _login_with_user_id(session, oxide_id, country)
-                pay_token, _ = await _create_pay_token(session, sku, country, user_jwt)
-                form = await _fetch_payment_form(session, pay_token, country)
-                submit = await _submit_form(session, pay_token, form, email, zip_code)
-                razer_url = _extract_razer_url(submit)
-                invoice_id = (submit.get("userSession") or {}).get("purchase_invoice_id", 0)
-                return razer_url, invoice_id
-        except XsollaAntifraudError as exc:
-            last_exc = exc
-            if attempt < max_retries:
-                await asyncio.sleep(retry_delay * (attempt + 1))
-                continue
-            raise
-        except OxideApiError:
-            # Не-transient ошибки (Razer Gold не подключён, плохой ID и т.п.) — не ретраим
-            raise
-
-    # для типизатора (теоретически недостижимо)
-    if last_exc:
-        raise last_exc
-    raise OxideApiError("get_razer_gold_url: unexpected fall-through")
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        user_jwt = await _login_with_user_id(session, oxide_id, country)
+        pay_token, _ = await _create_pay_token(session, sku, country, user_jwt)
+        form = await _fetch_payment_form(session, pay_token, country)
+        submit = await _submit_form(session, pay_token, form, email, zip_code)
+        razer_url = _extract_razer_url(submit)
+        invoice_id = (submit.get("userSession") or {}).get("purchase_invoice_id", 0)
+        return razer_url, invoice_id
 
 
 # ──────────────── обратная совместимость ───────────────────
