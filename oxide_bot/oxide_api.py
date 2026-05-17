@@ -3,10 +3,14 @@
 Поток получения прямой Razer Gold ссылки:
 1. POST sb-user-id-service.xsolla.com/api/v1/user-id  -> JWT с user_id игрока
 2. POST store.xsolla.com/.../payment/item/{sku}?country=...  (Bearer JWT) -> paystation token
-3. GET  paystation2/api/payment_form?id=3217  (с paystation token) -> форма Razer Gold с полями
+3. POST paystation2/api/directpayment с pid=3217 + country  -> форма Razer Gold (init)
 4. POST paystation2/api/directpayment  с xps_*-полями -> ответ с checkout.data.data (base64)
 5. Декодируем base64 → внутри есть base64-encoded URL global.gold.razer.com
 6. Возвращаем декодированный URL пользователю
+
+ВАЖНО: на шаге 3 нельзя использовать `GET /payment_form?id=3217` — для BY/RU/SEA-
+стран он отдаёт Form1380 (Bank card) как fallback. Только `directpayment с pid=3217`
+работает консистентно во всех странах где Razer Gold подключён.
 """
 import asyncio
 import base64
@@ -31,13 +35,15 @@ PAYSTATION_API = "https://secure.xsolla.com/paystation2/api"
 
 
 # ──────────────── каталог ──────────────────────────────────
-# sku, название, цена USD, рекомендованная страна (Razer Gold работает только с US/SEA/LatAm).
-# BY дала бы дешевле для BP'ов через карту, но Razer Gold там не подключён,
-# поэтому всё мапим на US — там Razer Gold точно отрабатывает.
+# sku, название, цена USD, рекомендованная страна.
+# Razer Gold работает во всех странах где он подключён в магазине Oxide:
+# - US (USD-цена для большинства товаров)
+# - BY/RU (BYN/RUB-цена дешевле для Battle Pass'ов — Razer сам конвертирует)
+# - SEA / LatAm — тоже работает, но цены такие же как US.
 CATALOG: list[tuple[str, str, str, str]] = [
     ("premium",                 "💎 PREMIUM подписка",          "$4.99",   "US"),
-    ("bp.season6.elite",        "🎖️ Battle Pass Elite",         "$19.99",  "US"),
-    ("bp.season6.regular",      "🥉 Battle Pass обычный",       "$9.99",   "US"),
+    ("bp.season6.elite",        "🎖️ Battle Pass Elite",         "45 BYN ≈ $14",  "BY"),
+    ("bp.season6.regular",      "🥉 Battle Pass обычный",       "22 BYN ≈ $7",   "BY"),
     ("50.coins",                "🪙 50 монет",                  "$1.99",   "US"),
     ("135.coins",               "🪙 135 монет",                 "$4.99",   "US"),
     ("290.coins",               "🪙 290 монет (-15%)",          "$9.99",   "US"),
@@ -128,28 +134,40 @@ async def _create_pay_token(
 
 
 async def _fetch_payment_form(
-    session: aiohttp.ClientSession, pay_token: str
+    session: aiohttp.ClientSession, pay_token: str, country: str
 ) -> dict[str, Any]:
-    """Шаг 3: получаем форму Razer Gold с её hidden-полями (signature, fix_v1 и пр.)."""
-    url = f"{PAYSTATION_API}/payment_form"
-    async with session.get(
+    """Шаг 3: получаем форму Razer Gold с её hidden-полями (signature, fix_v1 и пр.).
+
+    Использует POST `directpayment` с `pid=3217` (а не GET `payment_form?id=3217`):
+    - `id=3217` через payment_form у некоторых стран (BY/RU/...) триггерит
+      fallback на Form1380 (Bank card) — это не наш Razer Gold.
+    - `pid=3217` через directpayment пробивает ровно нужный метод и для US,
+      и для BY/RU/SEA — везде где Razer Gold подключён.
+    """
+    url = f"{PAYSTATION_API}/directpayment"
+    payload = [
+        ("access_token", pay_token),
+        ("pid", str(RAZER_GOLD_METHOD_ID)),
+        ("country", country),
+        ("refer", "3"),
+    ]
+    async with session.post(
         url,
-        params={"access_token": pay_token, "id": str(RAZER_GOLD_METHOD_ID)},
+        data=payload,
         headers={"X-Requested-With": "XMLHttpRequest"},
     ) as resp:
         data = await resp.json()
-    pf = data.get("payment_form") or {}
-    if pf.get("errors"):
-        raise OxideApiError(f"payment_form errors: {pf['errors']}")
-    form = pf.get("form")
+
+    if data.get("errors"):
+        raise OxideApiError(f"directpayment-init errors: {data['errors']}")
+
+    form = data.get("form")
     if not form:
-        raise OxideApiError("payment_form: no form fields returned")
-    # Если Xsolla подсунул дефолтную форму карты вместо Razer Gold — Razer Gold
-    # для этой страны/товара не подключён.
-    if pf.get("pid") != RAZER_GOLD_METHOD_ID:
+        raise OxideApiError("directpayment-init: no form fields returned")
+    if data.get("pid") != RAZER_GOLD_METHOD_ID:
         raise OxideApiError(
-            f"Razer Gold недоступен для этой страны (получили pid={pf.get('pid')}, "
-            f"title={pf.get('title')!r})"
+            f"Razer Gold недоступен для этой страны (got pid={data.get('pid')}, "
+            f"title={data.get('title')!r})"
         )
     return form
 
@@ -226,7 +244,7 @@ async def get_razer_gold_url(
     async with aiohttp.ClientSession(timeout=timeout) as session:
         user_jwt = await _login_with_user_id(session, oxide_id, country)
         pay_token, _ = await _create_pay_token(session, sku, country, user_jwt)
-        form = await _fetch_payment_form(session, pay_token)
+        form = await _fetch_payment_form(session, pay_token, country)
         submit = await _submit_form(session, pay_token, form, email, zip_code)
         razer_url = _extract_razer_url(submit)
         invoice_id = (submit.get("userSession") or {}).get("purchase_invoice_id", 0)
